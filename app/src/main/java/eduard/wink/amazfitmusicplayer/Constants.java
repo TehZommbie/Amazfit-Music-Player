@@ -8,6 +8,7 @@ import android.os.Environment;
 
 public class Constants {
 
+    public static final String TAG = "AmazfitMusicPlayer";
     public static final String PARENT_DIR = Environment.getExternalStorageDirectory()+"/Music/";
     public static int MAX_VOLUME = 30;
     public static int TIME_BETWEEN_SONG = 100;

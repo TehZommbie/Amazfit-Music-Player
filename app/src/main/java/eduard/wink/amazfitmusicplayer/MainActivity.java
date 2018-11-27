@@ -1,101 +1,136 @@
 package eduard.wink.amazfitmusicplayer;
 
-import android.content.ComponentName;
+import android.annotation.SuppressLint;
+import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
-import android.content.ServiceConnection;
+import android.content.IntentFilter;
 import android.content.SharedPreferences;
+import android.graphics.Bitmap;
+import android.graphics.drawable.BitmapDrawable;
+import android.media.AudioManager;
+import android.media.MediaPlayer;
 import android.os.Handler;
-import android.os.IBinder;
-import android.support.constraint.ConstraintLayout;
-import android.support.v7.app.AppCompatActivity;
 import android.os.Bundle;
+import android.os.PowerManager;
+import android.preference.PreferenceManager;
+import android.util.Log;
+import android.view.LayoutInflater;
 import android.view.View;
 import android.widget.AdapterView;
 import android.widget.ArrayAdapter;
 import android.widget.Button;
+import android.widget.LinearLayout;
 import android.widget.ListView;
 import android.widget.TextView;
 
 import java.io.File;
+import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
+import java.util.Random;
+import java.util.Timer;
+import java.util.TimerTask;
 
-public class MainActivity extends AppCompatActivity implements MediaPlayerService.Callbacks {
+import clc.sliteplugin.flowboard.AbstractPlugin;
+import clc.sliteplugin.flowboard.ISpringBoardHostStub;
 
+public class MainActivity extends AbstractPlugin implements MediaPlayer.OnCompletionListener, MediaButtonIntentReceiver.Callbacks {
 
-    Intent mediaPlayerIntent;
-    MediaPlayerService mediaPlayerService;
-    int currentPlaymode;
-    Handler handler;
-    SharedPreferences sharedPref;
-    SharedPreferences.Editor editor;
+    private boolean isActive = false;
+    private Context mContext;
+    private View mView;
 
-    List<String> directories;
+    private MediaPlayer mediaPlayer;
+    //Timer handles automatically play next song
+    private Timer timer;
+    //Handler checks for Timeout
+    private Handler handler = null;
+    //Timer for AirPods 4x Tap
+    private Timer airPodTimer;
 
-    //View / UI variables
-    ListView folderList;
-    ConstraintLayout constraintVolume;
-    Button folderBtn;
-    Button playBtn;
-    Button nextBtn;
-    Button prevBtn;
-    Button setVolumeBtn;
-    Button volDownBtn;
-    Button volUpBtn;
-    Button closeVolBtn;
-    Button playmodeBtn;
-    TextView txtSongName;
-    TextView txtVolume;
-    Boolean folderListOpen = false;
+    private int currentPlaymode;
 
+    private List<String> directories;
+
+    private ListView folderList;
+    LinearLayout mainLayout, layoutVolume;
+    private Button folderBtn, playBtn, nextBtn, prevBtn, playmodeBtn;
+    private TextView txtSongName, txtVolume;
+    private Boolean folderListOpen = false;
+
+    private MediaButtonIntentReceiver mMediaButtonReceiver = null;
+    private static MediaButtonIntentReceiver.Callbacks mediaButtonsCallback;
+
+    private WidgetSettings widgetSettings;
+
+    //Static variables which MainActivity reads
+    private static boolean isRunning = false;
+    private static boolean isMusicPlaying = false;
+    private static int currentVolume;
+    private static String currentSongName = "";
+
+    private Boolean isTimerRunning;
+    private int currentSongId;
+    private int playmode;
+    private List<File> playlist;
+
+    //For Airpods 4x Tap
+    private String lastHeadphonesTouch = "";
 
 
     /*
-    * Need a connection to send data to MediaPlayerService
+     * Check if headset disconnect - if so pause the player and service
      */
-    private ServiceConnection mConnection = new ServiceConnection() {
-
+    private BroadcastReceiver mNoisyReceiver = new BroadcastReceiver() {
         @Override
-        public void onServiceConnected(ComponentName className,
-                                       IBinder service) {
-            MediaPlayerService.LocalBinder binder = (MediaPlayerService.LocalBinder) service;
-            mediaPlayerService = binder.getServiceInstance(); //Get instance of your service!
-            mediaPlayerService.registerClient(MainActivity.this); //Activity register in the service as client for callabcks!
-        }
-
-        @Override
-        public void onServiceDisconnected(ComponentName arg0) {
-
+        public void onReceive(Context context, Intent intent) {
+            Log.i(Constants.TAG, "MainActivity Headset disconnects");
+            if( mediaPlayer.isPlaying() ) {
+                pauseSong();
+                stopMediaPlayerService();
+            }
         }
     };
 
 
-
-
-
     /*
-    *
-    * Override state methods
-    *
+     *
+     * Override and listener methods
+     *
      */
+    @SuppressLint("CommitPrefEdits")
     @Override
-    protected void onCreate(Bundle savedInstanceState) {
-        super.onCreate(savedInstanceState);
-        setContentView(R.layout.activity_main);
+    public View getView(Context paramContext) {
+        // Save Activity variables
+        this.mContext = paramContext;
 
+        Log.d(Constants.TAG, "MainActivity getView");
 
-        sharedPref= getSharedPreferences(Constants.SAVE_MY_PREF, Context.MODE_PRIVATE);
-        editor=sharedPref.edit();
+        this.mView = LayoutInflater.from(paramContext).inflate(R.layout.activity_main, null);
 
+        widgetSettings = new WidgetSettings(Constants.TAG, mContext);
+
+        mediaPlayer = new MediaPlayer();
+        mediaPlayer.setOnCompletionListener(this);
+        mediaPlayer.setWakeMode(mContext, PowerManager.PARTIAL_WAKE_LOCK);
+
+        IntentFilter filter = new IntentFilter(AudioManager.ACTION_AUDIO_BECOMING_NOISY);
+        mContext.registerReceiver(mNoisyReceiver, filter);
+
+        if (Constants.AIRPODS_QUAD_VOL) {
+            airPodTimer = new Timer();
+        }
 
         directories = getAllDirectories();
-
 
         initView();
 
         initButtons();
+
+        startCommand();
 
         if (musicExists(new File(Constants.PARENT_DIR))) {
             initFolderList();
@@ -103,78 +138,100 @@ public class MainActivity extends AppCompatActivity implements MediaPlayerServic
             handleNoMusicExists();
         }
 
-        currentPlaymode = sharedPref.getInt(Constants.SAVE_LAST_PLAYMODE, Constants.PLAYMODE_DEFAULT);
+        widgetSettings.reload();
+        currentPlaymode = widgetSettings.get(Constants.SAVE_LAST_PLAYMODE, Constants.PLAYMODE_DEFAULT);
         updatePlaymodeButton();
 
+        return this.mView;
 
-        if (MediaPlayerService.isRunning()) {
-            bindMediaPlayerService();
-        } else {
-            startMediaPlayerService();
+    }
+
+    //This Timer is for playing automatically next Song when current is over
+    private void cancelTimer() {
+        if (timer != null) {
+            timer.cancel();
+            isTimerRunning = false;
         }
-
-
     }
 
-
-    @Override
-    public void onDestroy() {
-        unbindService(mConnection);
-        super.onDestroy();
-    }
-
-    @Override
-    public void onResume() {
-        //bindService(mediaPlayerIntent, mConnection, Context.BIND_AUTO_CREATE);
-        super.onResume();
-    }
-
-    @Override
-    public void onPause() {
-        //unbindService(mConnection);
-        super.onPause();
+    //This Timer is for playing automatically next Song when current is over
+    private void newTimer() {
+        timer = new Timer();
+        isTimerRunning = true;
     }
     /*
-    * Override state methods end
+     * Override and listener methods end
      */
-
-
-
-
 
 
     /*
     *
     * Init methods
     *
-     */
+    */
+    private void startCommand() {
+        Log.d(Constants.TAG, "MainActivity startCommand");
+        isRunning = true;
+
+        initVolume();
+        initMediaButtonIntentReceiver();
+        initLastSong();
+    }
+
+    private void stopCommand() {
+        Log.d(Constants.TAG, "MainActivity stopCommand");
+        //stopMediaPlayerService();
+        pauseSong();
+        try {
+            mContext.unregisterReceiver(mNoisyReceiver);
+        } catch (IllegalArgumentException e) {
+            //e.printStackTrace();
+        }
+        if (mediaPlayer.isPlaying()) {
+            mediaPlayer.stop();
+        }
+        mediaPlayer.release();
+    }
+
+    public void onCompletion(MediaPlayer _mediaPlayer) {
+        stopMediaPlayerService();
+    }
+
+
     private void initView() {
-        folderList = (ListView) findViewById(R.id.folder_list);
+
+        Log.d(Constants.TAG, "MainActivity initView");
+
+        folderList = this.mView.findViewById(R.id.folder_list);
         folderList.setVisibility(View.GONE);
 
 
-        txtSongName = (TextView) findViewById(R.id.txt_song);
-        txtVolume = (TextView) findViewById(R.id.txtVol);
+        txtSongName = this.mView.findViewById(R.id.txt_song);
+        txtVolume = this.mView.findViewById(R.id.txtVol);
 
-        constraintVolume = (ConstraintLayout) findViewById(R.id.constraintVolume);
-        constraintVolume.setVisibility(View.GONE);
+        layoutVolume = this.mView.findViewById(R.id.layoutVolume);
+        mainLayout = this.mView.findViewById(R.id.mainLayout);
+        layoutVolume.setVisibility(View.GONE);
     }
 
     private void initButtons() {
-        folderBtn = (Button) findViewById(R.id.btn_folder);
-        playBtn = (Button) findViewById(R.id.btn_play);
-        nextBtn = (Button) findViewById(R.id.btn_next);
-        prevBtn = (Button) findViewById(R.id.btn_prev);
 
-        setVolumeBtn = (Button) findViewById(R.id.btn_set_volume);
-        playmodeBtn = (Button) findViewById(R.id.btn_playmode);
-        volDownBtn = (Button) findViewById(R.id.btn_vol_down);
-        volUpBtn = (Button) findViewById(R.id.btn_vol_up);
-        closeVolBtn = (Button) findViewById(R.id.btn_close_vol);
+        Log.d(Constants.TAG, "MainActivity initButtons");
+
+        folderBtn = this.mView.findViewById(R.id.btn_folder);
+        playBtn = this.mView.findViewById(R.id.btn_play);
+        nextBtn = this.mView.findViewById(R.id.btn_next);
+        prevBtn = this.mView.findViewById(R.id.btn_prev);
+
+        Button setVolumeBtn = this.mView.findViewById(R.id.btn_set_volume);
+        playmodeBtn = this.mView.findViewById(R.id.btn_playmode);
+        Button volDownBtn = this.mView.findViewById(R.id.btn_vol_down);
+        Button volUpBtn = this.mView.findViewById(R.id.btn_vol_up);
+        Button closeVolBtn = this.mView.findViewById(R.id.btn_close_vol);
 
 
-        String lastFolder = sharedPref.getString(Constants.SAVE_LAST_PLAYLIST, "");
-        if (lastFolder != "") {
+        String lastFolder = widgetSettings.get(Constants.SAVE_LAST_PLAYLIST, "");
+        if (!lastFolder.equals("")) {
             File folderFile = new File(Constants.PARENT_DIR+lastFolder);
             if (folderFile.exists()) {
                 folderBtn.setText(lastFolder.toUpperCase());
@@ -193,11 +250,12 @@ public class MainActivity extends AppCompatActivity implements MediaPlayerServic
         playBtn.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View view) {
-                if (!MediaPlayerService.isRunning()) {
-                    startMediaPlayerService();
-                    mediaPlayerService.playBtnClicked();
+                if (!isRunning) {
+                    updateSongName();
+                    updatePlayButton();
+                    playBtnClicked();
                 } else {
-                    mediaPlayerService.playBtnClicked();
+                    playBtnClicked();
                 }
             }
         });
@@ -205,8 +263,8 @@ public class MainActivity extends AppCompatActivity implements MediaPlayerServic
         nextBtn.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View view) {
-                if (MediaPlayerService.isRunning()) {
-                    mediaPlayerService.nextBtnClicked();
+                if (isRunning) {
+                    nextBtnClicked();
                 }
             }
         });
@@ -214,8 +272,8 @@ public class MainActivity extends AppCompatActivity implements MediaPlayerServic
         prevBtn.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View view) {
-                if (MediaPlayerService.isRunning()) {
-                    mediaPlayerService.prevBtnClicked();
+                if (isRunning) {
+                    prevBtnClicked();
                 }
             }
         });
@@ -224,9 +282,10 @@ public class MainActivity extends AppCompatActivity implements MediaPlayerServic
         setVolumeBtn.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View view) {
-                if (MediaPlayerService.isRunning()) {
+                if (isRunning) {
                     updateVolumeLabel();
-                    constraintVolume.setVisibility(View.VISIBLE);
+                    mainLayout.setVisibility(View.GONE);
+                    layoutVolume.setVisibility(View.VISIBLE);
                 }
             }
         });
@@ -234,9 +293,9 @@ public class MainActivity extends AppCompatActivity implements MediaPlayerServic
         playmodeBtn.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View view) {
-                if (MediaPlayerService.isRunning()) {
+                if (isRunning) {
                     changePlaymode();
-                    mediaPlayerService.changePlaymode(currentPlaymode);
+                    changePlaymode(currentPlaymode);
                 }
             }
         });
@@ -245,8 +304,8 @@ public class MainActivity extends AppCompatActivity implements MediaPlayerServic
         volDownBtn.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View view) {
-                if (MediaPlayerService.isRunning()) {
-                    mediaPlayerService.volDownBtnClicked();
+                if (isRunning) {
+                    volDownBtnClicked();
                 }
             }
         });
@@ -254,8 +313,8 @@ public class MainActivity extends AppCompatActivity implements MediaPlayerServic
         volUpBtn.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View view) {
-                if (MediaPlayerService.isRunning()) {
-                    mediaPlayerService.volUpBtnClicked();
+                if (isRunning) {
+                    volUpBtnClicked();
                 }
             }
         });
@@ -263,23 +322,25 @@ public class MainActivity extends AppCompatActivity implements MediaPlayerServic
         closeVolBtn.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View view) {
-                constraintVolume.setVisibility(View.GONE);
+                layoutVolume.setVisibility(View.GONE);
+                mainLayout.setVisibility(View.VISIBLE);
             }
         });
     }
 
     private void initFolderList() {
+
+        Log.d(Constants.TAG, "MainActivity initFolderList");
+
         final ArrayList<String> directorieStrings = new ArrayList<>();
 
         //init directory List
         directorieStrings.add(Constants.ALL_SONGS);
-        for (String s: directories) {
-            directorieStrings.add(s);
-        }
+        directorieStrings.addAll(directories);
         directorieStrings.add(Constants.CLOSE_FOLDER_LIST);
 
         ArrayAdapter<String> arrayAdapter = new ArrayAdapter<String>(
-                this,
+                mContext,
                 R.layout.list_white_text, R.id.list_text,
                 directorieStrings );
 
@@ -293,8 +354,9 @@ public class MainActivity extends AppCompatActivity implements MediaPlayerServic
             public void onItemClick(AdapterView<?> adapterView, View view, int i, long l) {
 
                 if (!directorieStrings.get(i).equals(Constants.CLOSE_FOLDER_LIST)) {
-                    if (!MediaPlayerService.isRunning()) {
-                        startMediaPlayerService();
+                    if (!isRunning) {
+                        updateSongName();
+                        updatePlayButton();
                     }
                     changePlaylist(directorieStrings.get(i));
                 }
@@ -306,8 +368,11 @@ public class MainActivity extends AppCompatActivity implements MediaPlayerServic
     }
 
     private List<String> getAllDirectories() {
+
+        Log.d(Constants.TAG, "MainActivity getAllDirectories");
+
         File parentDir = new File(Constants.PARENT_DIR);
-        ArrayList<String> directories = new ArrayList<String>();
+        ArrayList<String> directories = new ArrayList<>();
         File[] files = parentDir.listFiles();
         for (File file : files) {
             if (file.isDirectory()) {
@@ -324,9 +389,11 @@ public class MainActivity extends AppCompatActivity implements MediaPlayerServic
     }
 
     private boolean musicExists(File parentDir) {
+        Log.d(Constants.TAG, "MainActivity musicExists");
+
         File[] files = parentDir.listFiles();
         for (File file : files) {
-            if(file.getName().endsWith(".mp3")){
+            if(file.getName().toLowerCase().endsWith(".mp3") || file.getName().toLowerCase().endsWith(".m4a")){
                 return true;
             } else if (file.isDirectory()) {
                 if (musicExists(file)) {
@@ -337,10 +404,12 @@ public class MainActivity extends AppCompatActivity implements MediaPlayerServic
         return false;
     }
 
-    public void handleNoMusicExists() {
-        editor.remove(Constants.SAVE_LAST_SONG_ID).commit();
-        editor.remove(Constants.SAVE_LAST_PLAYLIST).commit();
-        editor.remove(Constants.SAVE_LAST_POSITION).commit();
+    private void handleNoMusicExists() {
+        Log.d(Constants.TAG, "MainActivity handleNoMusicExists");
+
+        widgetSettings.remove(Constants.SAVE_LAST_SONG_ID);
+        widgetSettings.remove(Constants.SAVE_LAST_PLAYLIST);
+        widgetSettings.remove(Constants.SAVE_LAST_POSITION);
         playBtn.setEnabled(false);
         nextBtn.setEnabled(false);
         prevBtn.setEnabled(false);
@@ -348,54 +417,419 @@ public class MainActivity extends AppCompatActivity implements MediaPlayerServic
         folderBtn.setText("NO MUSIC");
         folderBtn.setEnabled(false);
     }
+
+    private void initVolume() {
+        Log.d(Constants.TAG, "MainActivity initVolume");
+        currentVolume = widgetSettings.get(Constants.SAVE_LAST_VOLUME, 3);
+        setVolume(currentVolume);
+    }
+
+
+    private void initMediaButtonIntentReceiver() {
+        Log.d(Constants.TAG, "MainActivity initMediaButtonIntentReceiver");
+        if (mMediaButtonReceiver == null) {
+            mMediaButtonReceiver = new MediaButtonIntentReceiver();
+            IntentFilter mediaFilter = new IntentFilter(Intent.ACTION_MEDIA_BUTTON);
+            mContext.registerReceiver(mMediaButtonReceiver, mediaFilter);
+            mediaButtonsCallback = this;
+            mMediaButtonReceiver.registerClient(mediaButtonsCallback);
+        }
+    }
+
+
+    private void initLastSong() {
+        Log.d(Constants.TAG, "MainActivity initLastSong");
+        String lastPlaylist = widgetSettings.get(Constants.SAVE_LAST_PLAYLIST, "all");
+        int lastPlaymode = widgetSettings.get(Constants.SAVE_LAST_PLAYMODE, Constants.PLAYMODE_DEFAULT);
+        int lastSong = widgetSettings.get(Constants.SAVE_LAST_SONG_ID, 0);
+
+        changePlaymode(lastPlaymode);
+
+        handlePlaylistChange(lastPlaylist);
+
+        if (playlist.size() > lastSong) {
+            currentSongId = lastSong;
+        } else {
+            currentSongId = 0;
+        }
+
+        if (playlist.size() <= currentSongId) {
+            currentSongName = Constants.NO_MUSIC_FILES_EXISTS;
+            currentSongId = -1;
+        } else {
+            currentSongName = playlist.get(currentSongId).getName();
+        }
+    }
     /*
     * Init methods end
-     */
-
-
-
-
+    */
 
 
     /*
-    *
     * MediaPlayer methods
-    *
-     */
-    public void changePlaymode() {
+    */
+    private void changePlaymode() {
+        Log.d(Constants.TAG, "MainActivity changePlaymode()");
         if (currentPlaymode + 1 < Constants.PLAYMODE_LIST.length) {
             currentPlaymode = Constants.PLAYMODE_LIST[currentPlaymode+1];
         } else {
             currentPlaymode = Constants.PLAYMODE_LIST[0];
         }
-
         updatePlaymodeButton();
-
-
-        mediaPlayerService.changePlaymode(currentPlaymode);
+        changePlaymode(currentPlaymode);
     }
 
-
-    public void bindMediaPlayerService() {
-        mediaPlayerIntent = new Intent(this, MediaPlayerService.class);
-        bindService(mediaPlayerIntent, mConnection, Context.BIND_AUTO_CREATE);
-        updateSongName();
-        updatePlayButton();
-    }
-
-    public void startMediaPlayerService() {
-        bindMediaPlayerService();
-        startService(mediaPlayerIntent);
-        updateSongName();
-        updatePlayButton();
-    }
     /*
     * MediaPlayer methods end
+    */
+
+
+    /*
+     *
+     * SONG PLAYER HELPER FUNCTIONS
+     *
+     */
+    private void stopMediaPlayerService() {
+        Log.d(Constants.TAG, "MainActivity stopMediaPlayerService");
+        cancelTimer();
+        isRunning = false;
+        try {
+            mContext.unregisterReceiver(mMediaButtonReceiver);
+        } catch (IllegalArgumentException e) {
+            //e.printStackTrace();
+        }
+        mMediaButtonReceiver = null;
+        stopCommand();
+
+    }
+
+    //Try to set the playlist - if folder not exist it will play all songs
+    private void handlePlaylistChange(String directory) {
+        if (directory.toLowerCase().equals("all")) {
+            playlist = getAllSongsInDirectory(new File(Constants.PARENT_DIR));
+        } else {
+            File lastDir = new File(Constants.PARENT_DIR+directory);
+            if (lastDir.exists()) {
+                playlist = getAllSongsInDirectory(lastDir);
+            } else {
+                playlist = getAllSongsInDirectory(new File(Constants.PARENT_DIR));
+            }
+        }
+    }
+
+
+    //Change or restart a playlist
+    private void mediaPlayerChangePlaylist(String directory) {
+        handlePlaylistChange(directory);
+        // Save your string in SharedPref
+        widgetSettings.set(Constants.SAVE_LAST_PLAYLIST, directory);
+
+        currentSongId = 0;
+        playSong(currentSongId, 0);
+    }
+
+
+    private void changePlaymode(int newMode) {
+        Log.d(Constants.TAG, "MainActivity changePlayMode newMode: " + newMode);
+        widgetSettings.set(Constants.SAVE_LAST_PLAYMODE, newMode);
+        playmode = newMode;
+        if (mediaPlayer.isPlaying()) {
+            checkForNextSong();
+        }
+    }
+
+    //This method will start playing the given song
+    private void playSong(int songId, int seek) {
+        Log.d(Constants.TAG, "MainActivity playSong");
+        if (!playlist.isEmpty()) {
+            if (playlist.size() <= songId) {
+                songId = 0;
+            }
+
+            widgetSettings.set(Constants.SAVE_LAST_SONG_ID, songId);
+
+            currentSongName = playlist.get(songId).getName();
+            File song = playlist.get(songId);
+            isMusicPlaying = true;
+            mediaPlayer.reset();
+            try {
+                mediaPlayer.setDataSource(song.getPath());
+                mediaPlayer.prepare();
+            } catch (IOException e) {
+                e.printStackTrace();
+            }
+
+            mediaPlayer.seekTo(seek);
+            mediaPlayer.start();
+            checkForNextSong();
+            if (isActive)
+                this.refreshView();
+
+        } else {
+            Log.e(Constants.TAG, "MainActivity Folder/Playlist is empty");
+        }
+    }
+
+    private void pauseSong() {
+        if (isMusicPlaying) {
+            widgetSettings.set(Constants.SAVE_LAST_POSITION, mediaPlayer.getCurrentPosition());
+            cancelTimer();
+            isMusicPlaying = false;
+            mediaPlayer.pause();
+            if (isActive)
+                this.refreshView();
+        }
+    }
+
+    private void resumeSong() {
+        if (!isMusicPlaying) {
+            int lastPos = widgetSettings.get(Constants.SAVE_LAST_POSITION, 0);
+            int lastSong = widgetSettings.get(Constants.SAVE_LAST_SONG_ID, 0);
+            playSong(lastSong, lastPos);
+        }
+    }
+
+    private void setVolume(int volume) {
+        if (volume < 0) {
+            volume = 0;
+        } else if (volume > Constants.MAX_VOLUME) {
+            volume = Constants.MAX_VOLUME;
+        }
+        currentVolume = volume;
+        widgetSettings.set(Constants.SAVE_LAST_VOLUME, currentVolume);
+        float log1=(float)(Math.log(Constants.MAX_VOLUME-volume)/Math.log(Constants.MAX_VOLUME));
+        mediaPlayer.setVolume(1-log1, 1-log1);
+        if (isActive)
+            this.refreshView();
+    }
+
+
+    //returns -1 if the playlist is over or unknown playmode
+    private int getNextSong() {
+        Log.d(Constants.TAG, "MainActivity getNextSong");
+        int nextSong = -1;
+        if (playmode == Constants.PLAYMODE_DEFAULT) {
+            if (playlist.size() > currentSongId+1) {
+                nextSong = currentSongId+1;
+            }
+        } else if (playmode == Constants.PLAYMODE_REPEAT_ALL) {
+            if (playlist.size() > currentSongId+1) {
+                nextSong = currentSongId+1;
+            } else {
+                nextSong = 0;
+            }
+        } else if (playmode == Constants.PLAYMODE_REPEAT_ONE) {
+            nextSong = currentSongId;
+        } else if (playmode == Constants.PLAYMODE_RANDOM) {
+            nextSong = new Random().nextInt(playlist.size());
+        }
+        return nextSong;
+    }
+
+    private int getPrevSong() {
+        Log.d(Constants.TAG, "MainActivity getPrevSong");
+        int prevSong = 0;
+        if (playmode == Constants.PLAYMODE_REPEAT_ONE) {
+            prevSong = currentSongId;
+        } else if (playmode == Constants.PLAYMODE_RANDOM) {
+            prevSong = new Random().nextInt(playlist.size());
+        } else {
+            if (currentSongId == 0) {
+                prevSong = playlist.size()-1;
+            }
+            if (currentSongId-1 > 0 ) {
+                prevSong = currentSongId-1;
+            }
+        }
+        return prevSong;
+    }
+
+    //if playmode is default the mediaplayer will stop after the current song
+    private void checkForNextSong() {
+        Log.d(Constants.TAG, "MainActivity checkForNextSong");
+        cancelTimer();
+        newTimer();
+        if (getNextSong() != -1) {
+            playNext();
+        } else {
+            stopPlaylist();
+        }
+    }
+
+    //play next song if the current one is over
+    //Will automatically be called if there is a next song in playlist
+    private void playNext() {
+        Log.d(Constants.TAG, "MainActivity playNext");
+        timer.schedule(new TimerTask() {
+            @Override
+            public void run() {
+                currentSongId = getNextSong();
+                if (currentSongId < 0) {
+                    currentSongId = 0;
+                }
+                playSong(currentSongId, 0);
+            }
+        },mediaPlayer.getDuration()-mediaPlayer.getCurrentPosition()+Constants.TIME_BETWEEN_SONG);
+    }
+
+    // Playlist is finished (in default mode)
+    private void stopPlaylist() {
+        Log.d(Constants.TAG, "MainActivity stopPlaylist");
+        timer.schedule(new TimerTask() {
+            @Override
+            public void run() {
+                currentSongId = 0;
+                currentSongName = playlist.get(currentSongId).getName();
+                mediaPlayer.seekTo(0);
+                widgetSettings.set(Constants.SAVE_LAST_SONG_ID, currentSongId);
+                pauseSong();
+            }
+        },mediaPlayer.getDuration()-mediaPlayer.getCurrentPosition());
+    }
+
+    //Collects all mp3 files in given folder and it's subfolder
+    private List<File> getAllSongsInDirectory(File parentDir) {
+        ArrayList<File> inFiles = new ArrayList<>();
+        File[] files = parentDir.listFiles();
+        for (File file : files) {
+            if (file.isDirectory()) {
+                inFiles.addAll(getAllSongsInDirectory(file));
+            } else {
+                if(file.getName().toLowerCase().endsWith(".mp3") || file.getName().toLowerCase().endsWith(".m4a")){
+                    inFiles.add(file);
+                }
+            }
+        }
+
+        //Sort songs by name
+        if (inFiles.size() > 1) {
+            Collections.sort(inFiles, new FileNameComparator());
+        }
+        return inFiles;
+    }
+    /*
+     * SONG PLAYER HELPER FUNCTIONS END
      */
 
 
 
+    /*
+     *
+     * Buttons methods
+     *
+     */
+    private void nextBtnClicked() {
+        if (!playlist.isEmpty()) {
+            currentSongId = getNextSong();
+            if (currentSongId == -1) {
+                currentSongId = 0;
+                Log.i(Constants.TAG, "MainActivity restart playlist");
+            }
+            playSong(currentSongId, 0);
+        }
+    }
 
+    private void prevBtnClicked() {
+        if (!playlist.isEmpty()) {
+            currentSongId = getPrevSong();
+            playSong(currentSongId, 0);
+        }
+    }
+
+    private void playBtnClicked() {
+        if (isMusicPlaying) {
+            pauseSong();
+        } else {
+            resumeSong();
+        }
+    }
+
+    private void volUpBtnClicked() {
+        setVolume(currentVolume+1);
+    }
+
+    private void volDownBtnClicked() {
+        setVolume(currentVolume-1);
+    }
+
+
+    @Override
+    public void headsetButtonClicked(String btn) {
+        if (Constants.AIRPODS_QUAD_VOL) {
+            if (Arrays.asList(Constants.AIRPODS_LEFT).contains(btn) || Arrays.asList(Constants.AIRPODS_RIGHT).contains(btn)) {
+                checkAirPods4Tap(btn);
+            } else {
+                handleHeadsetButton(btn);
+            }
+        } else {
+            handleHeadsetButton(btn);
+        }
+    }
+
+    private void handleHeadsetButton(String btn) {
+        switch (btn) {
+            case Constants.HEADSET_NEXT:
+                nextBtnClicked();
+                break;
+            case Constants.HEADSET_PREV:
+                prevBtnClicked();
+                break;
+            case Constants.HEADSET_PAUSE:
+            case Constants.HEADSET_STOP:
+                pauseSong();
+                break;
+            case Constants.HEADSET_PLAY:
+                resumeSong();
+                break;
+            case Constants.HEADSET_VOL_UP:
+                volUpBtnClicked();
+                break;
+            case Constants.HEADSET_VOL_DOWN:
+                volDownBtnClicked();
+                break;
+        }
+    }
+    /*
+     * Buttons methods end
+     */
+
+
+    /*
+     * AirPods method
+     */
+    private void checkAirPods4Tap(String btn) {
+        if (btn.equals(lastHeadphonesTouch)) {
+            //4x AirPod tap detected
+            cancelAirPodTimer();
+            if (Arrays.asList(Constants.AIRPODS_LEFT).contains(btn)) {
+                volDownBtnClicked();
+            } else if (Arrays.asList(Constants.AIRPODS_RIGHT).contains(btn)) {
+                volUpBtnClicked();
+            }
+        } else {
+            //It's a fast tap which is not the same as the first one - so the first tap will be ignored
+            if (!lastHeadphonesTouch.equals("")) {
+                cancelAirPodTimer();
+            }
+            lastHeadphonesTouch = btn;
+            airPodTimer.schedule(new TimerTask() {
+                @Override
+                public void run() {
+                    //Time for 4x Tap is over do normal double tap action
+                    handleHeadsetButton(lastHeadphonesTouch);
+                    cancelAirPodTimer();
+                }
+            }, Constants.AIRPODS_QUAD_DELAY);
+        }
+    }
+    private void cancelAirPodTimer() {
+        airPodTimer.cancel();
+        lastHeadphonesTouch = "";
+        airPodTimer = new Timer();
+    }
+    /*
+     * AirPods method end
+     */
 
 
 
@@ -404,25 +838,25 @@ public class MainActivity extends AppCompatActivity implements MediaPlayerServic
     * UI Methods
     *
      */
-    public void updateSongName() {
+    private void updateSongName() {
 
-            runOnUiThread(new Runnable() {
+        Log.d(Constants.TAG, "MainActivity updateSongName");
+
+        getHost().runTaskOnUI(MainActivity.this, new Runnable() {
 
                 @Override
                 public void run() {
-
-                    String songName = mediaPlayerService.getCurrentSongName();
+                    String songName = currentSongName;
                     txtSongName.setText(songName);
                     txtSongName.setSelected(true);
-
                 }
             });
 
-            String songName = mediaPlayerService.getCurrentSongName();
+            String songName = currentSongName;
 
             //If the songName isn't loaded yet retry in 1 sec
-            if (songName == "") {
-                handler = new Handler();
+            if (songName.equals("")) {
+                Handler handler = new Handler();
 
                 final Runnable r = new Runnable() {
                     public void run() {
@@ -434,13 +868,14 @@ public class MainActivity extends AppCompatActivity implements MediaPlayerServic
             }
     }
 
-    public void updateVolumeLabel() {
-        runOnUiThread(new Runnable() {
+    private void updateVolumeLabel() {
+        getHost().runTaskOnUI(MainActivity.this, new Runnable() {
 
+            @SuppressLint("SetTextI18n")
             @Override
             public void run() {
 
-                txtVolume.setText(Integer.toString(mediaPlayerService.getCurrentVolume()));
+                txtVolume.setText(Integer.toString(currentVolume));
 
             }
         });
@@ -448,14 +883,14 @@ public class MainActivity extends AppCompatActivity implements MediaPlayerServic
     }
 
     //will play a playlist from first song
-    public void changePlaylist(String newPlaylist) {
-        mediaPlayerService.changePlaylist(newPlaylist);
+    private void changePlaylist(String newPlaylist) {
+        mediaPlayerChangePlaylist(newPlaylist);
 
-        runOnUiThread(new Runnable() {
+        getHost().runTaskOnUI(MainActivity.this, new Runnable() {
 
             @Override
             public void run() {
-                String playlist = sharedPref.getString(Constants.SAVE_LAST_PLAYLIST, "");
+                String playlist = widgetSettings.get(Constants.SAVE_LAST_PLAYLIST, "");
                 folderBtn.setText(playlist.toUpperCase());
 
             }
@@ -463,13 +898,13 @@ public class MainActivity extends AppCompatActivity implements MediaPlayerServic
 
     }
 
-    public void updatePlayButton() {
-        runOnUiThread(new Runnable() {
+    private void updatePlayButton() {
+        getHost().runTaskOnUI(MainActivity.this, new Runnable() {
 
             @Override
             public void run() {
 
-                if (mediaPlayerService.isMusicPlaying()) {
+                if (isMusicPlaying) {
                     playBtn.setBackgroundResource(R.drawable.pause_button);
                 } else {
                     playBtn.setBackgroundResource(R.drawable.play_button);
@@ -480,7 +915,7 @@ public class MainActivity extends AppCompatActivity implements MediaPlayerServic
     }
 
     //Playmode will not be updated from service, so no need for "runOnUIiThread
-    public void updatePlaymodeButton() {
+    private void updatePlaymodeButton() {
         if (currentPlaymode == Constants.PLAYMODE_DEFAULT) {
             playmodeBtn.setBackgroundResource(R.drawable.default_button);
         } else if (currentPlaymode == Constants.PLAYMODE_REPEAT_ALL) {
@@ -493,7 +928,7 @@ public class MainActivity extends AppCompatActivity implements MediaPlayerServic
     }
 
 
-    public void openCloseFolderList() {
+    private void openCloseFolderList() {
         if (folderListOpen) {
             folderList.setVisibility(View.GONE);
             folderBtn.setVisibility(View.VISIBLE);
@@ -506,21 +941,130 @@ public class MainActivity extends AppCompatActivity implements MediaPlayerServic
     }
     /*
     * UI Methods end
-     */
+    */
 
 
-
-
-
-
-
-    /*
-    * The MediaPlayer Service sends update to refresh the view (like songname or play/pause button)
-     */
-    @Override
-    public void updateClient() {
+    private void refreshView() {
+        Log.d(Constants.TAG, "MainActivity refreshView");
         updateSongName();
         updatePlayButton();
         updateVolumeLabel();
     }
+
+
+    /*
+     * Widget active/deactivate state management
+     */
+
+    // On widget show
+    private void onShow() {
+        Log.d(Constants.TAG, "MainActivity onShow");
+        // If view loaded (and was inactive)
+        if (this.mView != null && !this.isActive) {
+                this.refreshView();
+        }
+
+        // Save state
+        this.isActive = true;
+    }
+
+    // On widget hide
+    private void onHide() {
+        Log.d(Constants.TAG, "MainActivity onHide");
+        // Save state
+        this.isActive = false;
+    }
+
+
+    // Events for widget hide
+    @Override
+    public void onInactive(Bundle paramBundle) {
+        super.onInactive(paramBundle);
+        this.onHide();
+    }
+    @Override
+    public void onPause() {
+        super.onPause();
+        this.onHide();
+    }
+    @Override
+    public void onStop() {
+        super.onStop();
+        this.onHide();
+    }
+
+    // Events for widget show
+    @Override
+    public void onActive(Bundle paramBundle) {
+        super.onActive(paramBundle);
+        this.onShow();
+    }
+    @Override
+    public void onResume() {
+        super.onResume();
+        this.onShow();
+    }
+
+
+    /*
+     * Below where are unchanged functions that the widget should have
+     */
+
+    // Return the icon for this page, used when the page is disabled in the app list. In this case, the launcher icon is used
+    @Override
+    public Bitmap getWidgetIcon(Context paramContext) {
+        return ((BitmapDrawable) this.mContext.getResources().getDrawable(R.mipmap.ic_launcher_round)).getBitmap();
+    }
+
+
+    // Return the launcher intent for this page. This might be used for the launcher as well when the page is disabled?
+    @Override
+    public Intent getWidgetIntent() {
+        //Intent localIntent = new Intent();
+        //localIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED);
+        //localIntent.setAction("android.intent.action.MAIN");
+        //localIntent.addCategory("android.intent.category.LAUNCHER");
+        //localIntent.setComponent(new ComponentName(this.mContext.getPackageName(), "com.huami.watch.deskclock.countdown.CountdownListActivity"));
+        return new Intent();
+    }
+
+
+    // Return the title for this page, used when the page is disabled in the app list. In this case, the app name is used
+    @Override
+    public String getWidgetTitle(Context paramContext) {
+        return this.mContext.getResources().getString(R.string.app_name);
+    }
+
+
+    // Save springboard host
+    private ISpringBoardHostStub host = null;
+
+    // Returns the springboard host
+    public ISpringBoardHostStub getHost() {
+        return this.host;
+    }
+
+    // Called when the page is loading and being bound to the host
+    @Override
+    public void onBindHost(ISpringBoardHostStub paramISpringBoardHostStub) {
+        // Log.d(widget.TAG, "onBindHost");
+        //Store host
+        this.host = paramISpringBoardHostStub;
+    }
+
+
+    // Not sure what this does, can't find it being used anywhere. Best leave it alone
+    @Override
+    public void onReceiveDataFromProvider(int paramInt, Bundle paramBundle) {
+        super.onReceiveDataFromProvider(paramInt, paramBundle);
+    }
+
+
+    // Called when the page is destroyed completely (in app mode). Same as the onDestroy method of an activity
+    @Override
+    public void onDestroy() {
+        stopMediaPlayerService();
+        super.onDestroy();
+    }
+
 }
