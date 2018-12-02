@@ -21,10 +21,11 @@ Because I use Apples AirPods I added a function to have 4 Buttons instead of 2. 
 * To sort the songs rename them like a playlist (i.e 01_song1.mp3, 02_song2.mp3)
 * After 5 minutes not listening to music the headset buttons will not work anymore. You have to open the app and touch a button in the app to reactivate the headset buttons. This is no error, it saves battery life.
 
-## Todo and known issues
+## Known issues
 * If you open the default music player the headset buttons will control the default player
   * Solution: Disconnect the headphones - open the new music player - and reconnect. After this steps don't open the default player again and the buttons will work forever
 * Directories within a subfolder will not be listed - the songs will be add to the parent folder playlist
-* Add a bar for the volume
+
+Original code GitHub page: https://github.com/3ddN/Amazfit-Music-Player
 
 ![amazfit-music-player](https://user-images.githubusercontent.com/19289439/46221779-aa7d3d80-c34e-11e8-9b84-f78be819936a.jpg)
