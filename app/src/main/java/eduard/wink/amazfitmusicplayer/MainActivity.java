@@ -5,7 +5,6 @@ import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
-import android.content.SharedPreferences;
 import android.graphics.Bitmap;
 import android.graphics.drawable.BitmapDrawable;
 import android.media.AudioManager;
@@ -13,7 +12,6 @@ import android.media.MediaPlayer;
 import android.os.Handler;
 import android.os.Bundle;
 import android.os.PowerManager;
-import android.preference.PreferenceManager;
 import android.util.Log;
 import android.view.LayoutInflater;
 import android.view.View;
@@ -146,6 +144,35 @@ public class MainActivity extends AbstractPlugin implements MediaPlayer.OnComple
 
     }
 
+    private boolean checkForInactivity() {
+        if (isMusicPlaying) {
+            return false;
+        } else {
+            Log.i(Constants.TAG, "stopped (timeout)");
+            stopMediaPlayerService();
+            return true;
+        }
+    }
+
+    private void restartInactivityTimer() {
+        if (handler == null) {
+            handler = new Handler();
+        } else {
+            handler.removeCallbacksAndMessages(null);
+        }
+
+        //If there is no music playing for SERVICE_TIMEOUT seconds the service will stop
+        final Runnable r = new Runnable() {
+            public void run() {
+                if (!checkForInactivity()) {
+                    handler.postDelayed(this, Constants.SERVICE_TIMEOUT);
+                }
+            }
+        };
+
+        handler.postDelayed(r, Constants.SERVICE_TIMEOUT);
+    }
+
     //This Timer is for playing automatically next Song when current is over
     private void cancelTimer() {
         if (timer != null) {
@@ -173,6 +200,7 @@ public class MainActivity extends AbstractPlugin implements MediaPlayer.OnComple
         Log.d(Constants.TAG, "MainActivity startCommand");
         isRunning = true;
 
+        restartInactivityTimer();
         initVolume();
         initMediaButtonIntentReceiver();
         initLastSong();
@@ -719,6 +747,7 @@ public class MainActivity extends AbstractPlugin implements MediaPlayer.OnComple
      *
      */
     private void nextBtnClicked() {
+        restartInactivityTimer();
         if (!playlist.isEmpty()) {
             currentSongId = getNextSong();
             if (currentSongId == -1) {
@@ -730,6 +759,7 @@ public class MainActivity extends AbstractPlugin implements MediaPlayer.OnComple
     }
 
     private void prevBtnClicked() {
+        restartInactivityTimer();
         if (!playlist.isEmpty()) {
             currentSongId = getPrevSong();
             playSong(currentSongId, 0);
@@ -737,6 +767,7 @@ public class MainActivity extends AbstractPlugin implements MediaPlayer.OnComple
     }
 
     private void playBtnClicked() {
+        restartInactivityTimer();
         if (isMusicPlaying) {
             pauseSong();
         } else {
