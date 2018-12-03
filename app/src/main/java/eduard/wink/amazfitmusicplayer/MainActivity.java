@@ -49,8 +49,6 @@ public class MainActivity extends AbstractPlugin implements MediaPlayer.OnComple
     //Timer for AirPods 4x Tap
     private Timer airPodTimer;
 
-    private int currentPlaymode;
-
     private List<String> directories;
 
     private ListView folderList;
@@ -67,11 +65,13 @@ public class MainActivity extends AbstractPlugin implements MediaPlayer.OnComple
     //Static variables which MainActivity reads
     private static boolean isRunning = false;
     private static boolean isMusicPlaying = false;
+    private static boolean isButtonsDisabled = false;
     private static int currentVolume;
     private static String currentSongName = "";
 
     private Boolean isTimerRunning;
     private int currentSongId;
+    private int currentPlaymode;
     private int playmode;
     private List<File> playlist;
 
@@ -110,51 +110,31 @@ public class MainActivity extends AbstractPlugin implements MediaPlayer.OnComple
         this.mView = LayoutInflater.from(paramContext).inflate(R.layout.activity_main, null);
 
         widgetSettings = new WidgetSettings(Constants.TAG, mContext);
-
-        mediaPlayer = new MediaPlayer();
-        mediaPlayer.setOnCompletionListener(this);
-        mediaPlayer.setWakeMode(mContext, PowerManager.PARTIAL_WAKE_LOCK);
-
-        IntentFilter filter = new IntentFilter(AudioManager.ACTION_AUDIO_BECOMING_NOISY);
-        mContext.registerReceiver(mNoisyReceiver, filter);
-
-        if (Constants.AIRPODS_QUAD_VOL) {
-            airPodTimer = new Timer();
-        }
-
-        directories = getAllDirectories();
+        widgetSettings.reload();
 
         initView();
-
         initButtons();
 
-        startCommand();
-
-        if (musicExists(new File(Constants.PARENT_DIR))) {
-            initFolderList();
-        } else {
-            handleNoMusicExists();
-        }
-
-        widgetSettings.reload();
-        currentPlaymode = widgetSettings.get(Constants.SAVE_LAST_PLAYMODE, Constants.PLAYMODE_DEFAULT);
-        updatePlaymodeButton();
+        initMusicFiles();
 
         return this.mView;
 
     }
 
     private boolean checkForInactivity() {
+        Log.d(Constants.TAG, "MainActivity checkForInactivity");
         if (isMusicPlaying) {
             return false;
         } else {
-            Log.i(Constants.TAG, "stopped (timeout)");
-            stopMediaPlayerService();
+            Log.i(Constants.TAG, "MainActivity checkForInactivity stopped (timeout)");
+            if (isRunning)
+                stopMediaPlayerService();
             return true;
         }
     }
 
     private void restartInactivityTimer() {
+        Log.d(Constants.TAG, "MainActivity restartInactivityTimer");
         if (handler == null) {
             handler = new Handler();
         } else {
@@ -175,6 +155,7 @@ public class MainActivity extends AbstractPlugin implements MediaPlayer.OnComple
 
     //This Timer is for playing automatically next Song when current is over
     private void cancelTimer() {
+        Log.d(Constants.TAG, "MainActivity cancelTimer");
         if (timer != null) {
             timer.cancel();
             isTimerRunning = false;
@@ -183,6 +164,7 @@ public class MainActivity extends AbstractPlugin implements MediaPlayer.OnComple
 
     //This Timer is for playing automatically next Song when current is over
     private void newTimer() {
+        Log.d(Constants.TAG, "MainActivity newTimer");
         timer = new Timer();
         isTimerRunning = true;
     }
@@ -200,9 +182,23 @@ public class MainActivity extends AbstractPlugin implements MediaPlayer.OnComple
         Log.d(Constants.TAG, "MainActivity startCommand");
         isRunning = true;
 
+        mediaPlayer = new MediaPlayer();
+        mediaPlayer.setOnCompletionListener(this);
+        mediaPlayer.setWakeMode(mContext, PowerManager.PARTIAL_WAKE_LOCK);
+
+        IntentFilter filter = new IntentFilter(AudioManager.ACTION_AUDIO_BECOMING_NOISY);
+        mContext.registerReceiver(mNoisyReceiver, filter);
+
+        if (Constants.AIRPODS_QUAD_VOL) {
+            airPodTimer = new Timer();
+        }
+
+        currentPlaymode = widgetSettings.get(Constants.SAVE_LAST_PLAYMODE, Constants.PLAYMODE_DEFAULT);
+        updatePlaymodeButton();
+
         restartInactivityTimer();
-        initVolume();
         initMediaButtonIntentReceiver();
+        initVolume();
         initLastSong();
     }
 
@@ -210,21 +206,36 @@ public class MainActivity extends AbstractPlugin implements MediaPlayer.OnComple
         Log.d(Constants.TAG, "MainActivity stopCommand");
         //stopMediaPlayerService();
         pauseSong();
+        //widgetSettings.set(Constants.SAVE_LAST_POSITION, 0);
         try {
             mContext.unregisterReceiver(mNoisyReceiver);
+            if (mediaPlayer.isPlaying()) {
+                mediaPlayer.stop();
+            }
+            mediaPlayer.release();
         } catch (IllegalArgumentException e) {
-            //e.printStackTrace();
+            Log.e(Constants.TAG, "MainActivity stopCommand IllegalArgumentException: " + e.toString());
         }
-        if (mediaPlayer.isPlaying()) {
-            mediaPlayer.stop();
-        }
-        mediaPlayer.release();
     }
 
     public void onCompletion(MediaPlayer _mediaPlayer) {
         stopMediaPlayerService();
     }
 
+    private void initMusicFiles() {
+
+        Log.d(Constants.TAG, "MainActivity initMusicFiles");
+
+        directories = getAllDirectories();
+
+        if (musicExists(new File(Constants.PARENT_DIR))) {
+            initFolderList();
+            if (!isRunning)
+                initLastSong();
+        } else {
+            handleNoMusicExists();
+        }
+    }
 
     private void initView() {
 
@@ -376,7 +387,6 @@ public class MainActivity extends AbstractPlugin implements MediaPlayer.OnComple
 
         folderList.setSelector(R.drawable.folder_list_item);
 
-
         folderList.setOnItemClickListener(new AdapterView.OnItemClickListener() {
             @Override
             public void onItemClick(AdapterView<?> adapterView, View view, int i, long l) {
@@ -417,7 +427,7 @@ public class MainActivity extends AbstractPlugin implements MediaPlayer.OnComple
     }
 
     private boolean musicExists(File parentDir) {
-        Log.d(Constants.TAG, "MainActivity musicExists");
+        Log.d(Constants.TAG, "MainActivity musicExists parentDir: " + parentDir.toString());
 
         File[] files = parentDir.listFiles();
         for (File file : files) {
@@ -442,8 +452,21 @@ public class MainActivity extends AbstractPlugin implements MediaPlayer.OnComple
         nextBtn.setEnabled(false);
         prevBtn.setEnabled(false);
         txtSongName.setText(Constants.NO_MUSIC_FILES_EXISTS);
-        folderBtn.setText("NO MUSIC");
+        folderBtn.setText(Constants.NO_MUSIC);
         folderBtn.setEnabled(false);
+        isButtonsDisabled = true;
+    }
+
+    private void handleMusicExists() {
+        Log.d(Constants.TAG, "MainActivity handleMusicExists");
+
+        playBtn.setEnabled(true);
+        nextBtn.setEnabled(true);
+        prevBtn.setEnabled(true);
+        txtSongName.setText(currentSongName);
+        folderBtn.setText(Constants.ALL_SONGS);
+        folderBtn.setEnabled(true);
+        isButtonsDisabled = false;
     }
 
     private void initVolume() {
@@ -467,13 +490,21 @@ public class MainActivity extends AbstractPlugin implements MediaPlayer.OnComple
 
     private void initLastSong() {
         Log.d(Constants.TAG, "MainActivity initLastSong");
-        String lastPlaylist = widgetSettings.get(Constants.SAVE_LAST_PLAYLIST, "all");
+        String lastPlaylist = widgetSettings.get(Constants.SAVE_LAST_PLAYLIST, Constants.PLAYLIST_DEFAULT);
         int lastPlaymode = widgetSettings.get(Constants.SAVE_LAST_PLAYMODE, Constants.PLAYMODE_DEFAULT);
         int lastSong = widgetSettings.get(Constants.SAVE_LAST_SONG_ID, 0);
 
+        //Log.d(Constants.TAG, "MainActivity initLastSong lastPlaylist: " + lastPlaylist + " \\ lastSong: " + lastSong);
+
         changePlaymode(lastPlaymode);
 
+        //Log.d(Constants.TAG, "MainActivity initLastSong #1");
+
         handlePlaylistChange(lastPlaylist);
+
+        //Log.d(Constants.TAG, "MainActivity initLastSong #2");
+
+        //Log.d(Constants.TAG, "MainActivity initLastSong playlist.size: " + playlist.size());
 
         if (playlist.size() > lastSong) {
             currentSongId = lastSong;
@@ -487,6 +518,11 @@ public class MainActivity extends AbstractPlugin implements MediaPlayer.OnComple
         } else {
             currentSongName = playlist.get(currentSongId).getName();
         }
+        if (isButtonsDisabled)
+            handleMusicExists();
+        updateSongName();
+        updatePlayButton();
+        updateVolumeLabel();
     }
     /*
     * Init methods end
@@ -519,20 +555,23 @@ public class MainActivity extends AbstractPlugin implements MediaPlayer.OnComple
      */
     private void stopMediaPlayerService() {
         Log.d(Constants.TAG, "MainActivity stopMediaPlayerService");
-        cancelTimer();
+        if (isTimerRunning)
+            cancelTimer();
+        if (isRunning)
+            stopCommand();
         isRunning = false;
         try {
             mContext.unregisterReceiver(mMediaButtonReceiver);
         } catch (IllegalArgumentException e) {
-            //e.printStackTrace();
+            Log.e(Constants.TAG, "MainActivity stopMediaPlayerService IllegalArgumentException: " + e.toString());
         }
         mMediaButtonReceiver = null;
-        stopCommand();
 
     }
 
     //Try to set the playlist - if folder not exist it will play all songs
     private void handlePlaylistChange(String directory) {
+        Log.d(Constants.TAG, "MainActivity handlePlayListChange");
         if (directory.toLowerCase().equals("all")) {
             playlist = getAllSongsInDirectory(new File(Constants.PARENT_DIR));
         } else {
@@ -548,22 +587,31 @@ public class MainActivity extends AbstractPlugin implements MediaPlayer.OnComple
 
     //Change or restart a playlist
     private void mediaPlayerChangePlaylist(String directory) {
+        Log.d(Constants.TAG, "MainActivity mediaPlayerChangePlaylist");
         handlePlaylistChange(directory);
         // Save your string in SharedPref
         widgetSettings.set(Constants.SAVE_LAST_PLAYLIST, directory);
 
-        currentSongId = 0;
+        if (currentPlaymode == Constants.PLAYMODE_RANDOM)
+            currentSongId = getNextSong();
+        else
+            currentSongId = 0;
+
         playSong(currentSongId, 0);
     }
 
 
     private void changePlaymode(int newMode) {
         Log.d(Constants.TAG, "MainActivity changePlayMode newMode: " + newMode);
-        widgetSettings.set(Constants.SAVE_LAST_PLAYMODE, newMode);
         playmode = newMode;
-        if (mediaPlayer.isPlaying()) {
+        //Log.d(Constants.TAG, "MainActivity changePlayMode #1");
+        widgetSettings.set(Constants.SAVE_LAST_PLAYMODE, newMode);
+        //Log.d(Constants.TAG, "MainActivity changePlayMode #2");
+        if (isMusicPlaying) {
+            //Log.d(Constants.TAG, "MainActivity changePlayMode #3");
             checkForNextSong();
         }
+        //Log.d(Constants.TAG, "MainActivity changePlayMode #4");
     }
 
     //This method will start playing the given song
@@ -578,13 +626,19 @@ public class MainActivity extends AbstractPlugin implements MediaPlayer.OnComple
 
             currentSongName = playlist.get(songId).getName();
             File song = playlist.get(songId);
+
+            if (!isRunning)
+                startCommand();
+
             isMusicPlaying = true;
-            mediaPlayer.reset();
             try {
+                mediaPlayer.reset();
                 mediaPlayer.setDataSource(song.getPath());
                 mediaPlayer.prepare();
             } catch (IOException e) {
-                e.printStackTrace();
+                Log.e(Constants.TAG, "MainActivity playSong IOException: " + e.toString());
+            } catch (IllegalStateException e) {
+                Log.e(Constants.TAG, "MainActivity playSong IllegalStateException: " + e.toString());
             }
 
             mediaPlayer.seekTo(seek);
@@ -599,8 +653,12 @@ public class MainActivity extends AbstractPlugin implements MediaPlayer.OnComple
     }
 
     private void pauseSong() {
+        Log.d(Constants.TAG, "MainActivity pauseSong");
         if (isMusicPlaying) {
-            widgetSettings.set(Constants.SAVE_LAST_POSITION, mediaPlayer.getCurrentPosition());
+            if (isTimerRunning)
+                widgetSettings.set(Constants.SAVE_LAST_POSITION, mediaPlayer.getCurrentPosition());
+            else
+                widgetSettings.set(Constants.SAVE_LAST_POSITION, 0);
             cancelTimer();
             isMusicPlaying = false;
             mediaPlayer.pause();
@@ -610,6 +668,7 @@ public class MainActivity extends AbstractPlugin implements MediaPlayer.OnComple
     }
 
     private void resumeSong() {
+        Log.d(Constants.TAG, "MainActivity resumeSong");
         if (!isMusicPlaying) {
             int lastPos = widgetSettings.get(Constants.SAVE_LAST_POSITION, 0);
             int lastSong = widgetSettings.get(Constants.SAVE_LAST_SONG_ID, 0);
@@ -618,6 +677,7 @@ public class MainActivity extends AbstractPlugin implements MediaPlayer.OnComple
     }
 
     private void setVolume(int volume) {
+        Log.d(Constants.TAG, "MainActivity setVolume");
         if (volume < 0) {
             volume = 0;
         } else if (volume > Constants.MAX_VOLUME) {
@@ -634,7 +694,7 @@ public class MainActivity extends AbstractPlugin implements MediaPlayer.OnComple
 
     //returns -1 if the playlist is over or unknown playmode
     private int getNextSong() {
-        Log.d(Constants.TAG, "MainActivity getNextSong");
+        Log.d(Constants.TAG, "MainActivity getNextSong playlist.size: " + playlist.size());
         int nextSong = -1;
         if (playmode == Constants.PLAYMODE_DEFAULT) {
             if (playlist.size() > currentSongId+1) {
@@ -651,6 +711,7 @@ public class MainActivity extends AbstractPlugin implements MediaPlayer.OnComple
         } else if (playmode == Constants.PLAYMODE_RANDOM) {
             nextSong = new Random().nextInt(playlist.size());
         }
+        Log.d(Constants.TAG, "MainActivity getNextSong nextSong: " + nextSong);
         return nextSong;
     }
 
@@ -676,6 +737,7 @@ public class MainActivity extends AbstractPlugin implements MediaPlayer.OnComple
     private void checkForNextSong() {
         Log.d(Constants.TAG, "MainActivity checkForNextSong");
         cancelTimer();
+        widgetSettings.set(Constants.SAVE_LAST_POSITION, 0);
         newTimer();
         if (getNextSong() != -1) {
             playNext();
@@ -710,6 +772,7 @@ public class MainActivity extends AbstractPlugin implements MediaPlayer.OnComple
                 currentSongName = playlist.get(currentSongId).getName();
                 mediaPlayer.seekTo(0);
                 widgetSettings.set(Constants.SAVE_LAST_SONG_ID, currentSongId);
+                //widgetSettings.set(Constants.SAVE_LAST_POSITION, 0);
                 pauseSong();
             }
         },mediaPlayer.getDuration()-mediaPlayer.getCurrentPosition());
@@ -886,7 +949,7 @@ public class MainActivity extends AbstractPlugin implements MediaPlayer.OnComple
             String songName = currentSongName;
 
             //If the songName isn't loaded yet retry in 1 sec
-            if (songName.equals("")) {
+            if (songName.equals("") && isActive) {
                 Handler handler = new Handler();
 
                 final Runnable r = new Runnable() {
@@ -977,9 +1040,13 @@ public class MainActivity extends AbstractPlugin implements MediaPlayer.OnComple
 
     private void refreshView() {
         Log.d(Constants.TAG, "MainActivity refreshView");
-        updateSongName();
-        updatePlayButton();
-        updateVolumeLabel();
+        if (!isRunning)
+            initMusicFiles();
+        else {
+            updateSongName();
+            updatePlayButton();
+            updateVolumeLabel();
+        }
     }
 
 

@@ -12,6 +12,7 @@ public class Constants {
     public static final String PARENT_DIR = Environment.getExternalStorageDirectory()+"/Music/";
     public static int MAX_VOLUME = 30;
     public static int TIME_BETWEEN_SONG = 100;
+    public static String PLAYLIST_DEFAULT = "all";
     public static int PLAYMODE_DEFAULT = 0;
     public static int PLAYMODE_REPEAT_ALL = 1;
     public static int PLAYMODE_REPEAT_ONE = 2;
@@ -27,6 +28,7 @@ public class Constants {
     public static String ALL_SONGS = "ALL";
     public static String CLOSE_FOLDER_LIST = ">> CLOSE <<";
     public static String NO_MUSIC_FILES_EXISTS = "NO MUSIC EXISTS";
+    public static String NO_MUSIC = "NO MUSIC";
 
     //After this time without playing music the headset buttons won't work - to safe battery
     //You have to open the app again and press a button (i.e play) in the app
