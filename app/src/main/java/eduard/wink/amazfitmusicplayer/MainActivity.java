@@ -709,7 +709,9 @@ public class MainActivity extends AbstractPlugin implements MediaPlayer.OnComple
         } else if (playmode == Constants.PLAYMODE_REPEAT_ONE) {
             nextSong = currentSongId;
         } else if (playmode == Constants.PLAYMODE_RANDOM) {
-            nextSong = new Random().nextInt(playlist.size());
+            for(nextSong = new Random().nextInt(playlist.size());nextSong==currentSongId;){
+				nextSong = new Random().nextInt(playlist.size());
+			}
         }
         Log.d(Constants.TAG, "MainActivity getNextSong nextSong: " + nextSong);
         return nextSong;
@@ -721,7 +723,9 @@ public class MainActivity extends AbstractPlugin implements MediaPlayer.OnComple
         if (playmode == Constants.PLAYMODE_REPEAT_ONE) {
             prevSong = currentSongId;
         } else if (playmode == Constants.PLAYMODE_RANDOM) {
-            prevSong = new Random().nextInt(playlist.size());
+           for(prevSong = new Random().nextInt(playlist.size());prevSong==currentSongId;){
+				prevSong = new Random().nextInt(playlist.size());
+			}
         } else {
             if (currentSongId == 0) {
                 prevSong = playlist.size()-1;
